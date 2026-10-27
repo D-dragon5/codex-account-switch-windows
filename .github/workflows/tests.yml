@@ -1,0 +1,21 @@
+name: Windows tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24'
+      - name: Unit tests
+        run: node --test
+      - name: Windows process and lifecycle tests
+        shell: powershell
+        run: .\tests\windows-smoke.ps1 -NodePath (Get-Command node.exe).Source
+      - name: Synthetic pipeline tests
+        run: node tests/pipeline-smoke.cjs

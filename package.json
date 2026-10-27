@@ -1,0 +1,12 @@
+{
+  "name": "codex-account-switch-windows",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Windows Codex desktop account switching scripts and agent skill",
+  "license": "MIT",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "test": "node --test",
+    "test:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows-smoke.ps1"
+  }
+}

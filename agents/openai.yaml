@@ -1,0 +1,6 @@
+interface:
+  display_name: "Codex 账号切换"
+  short_description: "检查聊天状态后切换 Codex 账号，保留当前网络设置"
+  default_prompt: "使用 $codex-account-switch 切换 Codex 账号，执行前检查其它聊天，登录前只读确认美国出口，不修改 VPN 或节点。"
+policy:
+  allow_implicit_invocation: true

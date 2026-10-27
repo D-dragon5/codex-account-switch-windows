@@ -1,0 +1,8 @@
+{
+  "launchDelaySeconds": 3,
+  "closeGraceSeconds": 5,
+  "accounts": {
+    "pro": { "credentialSources": [] },
+    "plus": { "credentialSources": [] }
+  }
+}

@@ -1,0 +1,23 @@
+# Local configuration, credentials and runtime state must never be committed.
+config.json
+auth.json
+pro.json
+plus.json
+rollback.json
+*.local.json
+*.sqlite*
+*.db*
+*.log
+.env*
+state/
+vault/
+account-switch/
+diagnostics/
+skill-backups/
+job-*.json*
+switch.lock*
+node_modules/
+coverage/
+work/
+outputs/
+*.tmp
