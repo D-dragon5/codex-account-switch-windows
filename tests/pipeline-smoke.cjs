@@ -14,6 +14,30 @@ const nativeSpawnSync = childProcess.spawnSync;
 const pause = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 let caseRoot = null;
 let networkCalls = 0;
+let phase = 'initializing';
+let workerDiagnostic = null;
+
+function diagnostic(error) {
+  const result = {error: engine.safeError(error), phase};
+  // Only our static assertion labels are publishable. AssertionError's usual
+  // actual/expected diff can contain paths, so never print the complete message.
+  const firstLine = String(error?.message || '').split('\n')[0];
+  if (/^[A-Z][A-Z0-9_]{2,80}$/.test(firstLine)) result.assertion = firstLine;
+  if (/^[A-Z][A-Z0-9_]{2,80}$/.test(error?.helperCode || '')) result.helperCode = error.helperCode;
+  if (/^[a-z_]{3,60}$/.test(error?.helperPhase || '')) result.helperPhase = error.helperPhase;
+  return result;
+}
+
+function safeWorkerDiagnostic(value) {
+  if (!value || typeof value !== 'object') return null;
+  const result = {};
+  if (/^[A-Z][A-Z0-9_]{2,80}$/.test(value.error || '')) result.error = value.error;
+  if (/^[a-z][a-z-]{2,80}$/.test(value.phase || '')) result.phase = value.phase;
+  if (/^[A-Z][A-Z0-9_]{2,80}$/.test(value.assertion || '')) result.assertion = value.assertion;
+  if (/^[A-Z][A-Z0-9_]{2,80}$/.test(value.helperCode || '')) result.helperCode = value.helperCode;
+  if (/^[a-z_]{3,60}$/.test(value.helperPhase || '')) result.helperPhase = value.helperPhase;
+  return Object.keys(result).length ? result : null;
+}
 
 function within(file, directory = caseRoot) {
   assert.equal(typeof directory, 'string', 'FIXTURE_ROOT_REQUIRED');
@@ -59,7 +83,7 @@ globalThis.fetch = forbidNetwork;
 childProcess.spawn = () => { throw new Error('REAL_PROCESS_SPAWN_FORBIDDEN'); };
 childProcess.spawnSync = (executable, argv, options) => {
   assert.equal(path.resolve(executable).toLowerCase(), path.resolve(PS).toLowerCase(), 'UNEXPECTED_EXECUTABLE');
-  assert.equal(path.resolve(argv[argv.indexOf('-File') + 1]), HELPER, 'UNEXPECTED_HELPER');
+  assert.equal(path.resolve(argv[argv.indexOf('-File') + 1]).toLowerCase(), HELPER.toLowerCase(), 'UNEXPECTED_HELPER');
   assert.equal(argv[argv.indexOf('-Action') + 1], 'SetPrivateAcl', 'REAL_DESKTOP_ACTION_FORBIDDEN');
   within(argv[argv.indexOf('-FilePath') + 1]);
   return nativeSpawnSync(executable, argv, options);
@@ -110,22 +134,25 @@ function finishCallerAndOptionallyStartChat(blocked) {
 }
 
 function loadConfig(directory) {
+  phase = 'config-path-validation';
   caseRoot = validateCaseRoot(directory);
   const file = within(path.join(caseRoot, 'config.json'));
+  phase = 'config-loading';
   const c = engine.config(file, {CODEX_HOME: path.join(caseRoot, 'home'), APPDATA: path.join(caseRoot, 'appdata')});
   for (const key of ['authPath', 'vaultRoot', 'stateRoot', 'clashConfigRoot']) within(c[key]);
-  assert.equal(c.authPath, path.join(caseRoot, 'home', 'auth.json'));
-  assert.equal(c.stateRoot, path.join(caseRoot, 'state'));
-  assert.equal(c.vaultRoot, path.join(caseRoot, 'vault'));
-  assert.equal(c.nodePath.toLowerCase(), process.execPath.toLowerCase());
-  assert.equal(c.launchDelaySeconds, 3);
-  assert.equal(c.closeGraceSeconds, 5);
-  assert.deepEqual(c.accounts, {pro: {credentialSources: []}, plus: {credentialSources: []}});
+  assert.equal(c.authPath.toLowerCase(), path.join(caseRoot, 'home', 'auth.json').toLowerCase(), 'CONFIG_AUTH_PATH_MISMATCH');
+  assert.equal(c.stateRoot.toLowerCase(), path.join(caseRoot, 'state').toLowerCase(), 'CONFIG_STATE_PATH_MISMATCH');
+  assert.equal(c.vaultRoot.toLowerCase(), path.join(caseRoot, 'vault').toLowerCase(), 'CONFIG_VAULT_PATH_MISMATCH');
+  assert.equal(c.nodePath.toLowerCase(), process.execPath.toLowerCase(), 'CONFIG_NODE_PATH_MISMATCH');
+  assert.equal(c.launchDelaySeconds, 3, 'CONFIG_LAUNCH_DELAY_MISMATCH');
+  assert.equal(c.closeGraceSeconds, 5, 'CONFIG_CLOSE_GRACE_MISMATCH');
+  assert.deepEqual(c.accounts, {pro: {credentialSources: []}, plus: {credentialSources: []}}, 'CONFIG_ACCOUNTS_MISMATCH');
   return c;
 }
 
 function operations(c, isWorker) {
   function privateWrite(file, bytes) {
+    phase = 'private-credential-write';
     within(file);
     assert.ok([c.authPath, path.join(c.vaultRoot, 'pro.json'), path.join(c.vaultRoot, 'plus.json'),
       path.join(c.stateRoot, 'rollback.json')].includes(path.resolve(file)), 'UNEXPECTED_CREDENTIAL_DESTINATION');
@@ -138,9 +165,10 @@ function operations(c, isWorker) {
     delay: pause,
     privateWrite,
     inspectChatActivity(config, options) {
-      assert.equal(config, c);
-      assert.equal(options.callerThreadId, 'synthetic-caller');
-      if (options.phase === 'close') assert.equal(options.expectedCallerTurnId, 'synthetic-requesting-turn');
+      phase = options.phase === 'close' ? 'activity-check-close' : 'activity-check-schedule';
+      assert.equal(config, c, 'ACTIVITY_CONFIG_MISMATCH');
+      assert.equal(options.callerThreadId, 'synthetic-caller', 'ACTIVITY_CALLER_MISMATCH');
+      if (options.phase === 'close') assert.equal(options.expectedCallerTurnId, 'synthetic-requesting-turn', 'ACTIVITY_TURN_MISMATCH');
       event('real-activity-check-' + options.phase);
       return inspectChatActivity(config, options);
     },
@@ -148,6 +176,7 @@ function operations(c, isWorker) {
       countries: [{host: 'chatgpt.com', country: 'US'}, {host: 'api.openai.com', country: 'US'}],
       proxyUrl: 'http://127.0.0.1:17897'}),
     onlineAccount: async config => {
+      phase = 'simulated-online-authentication';
       assert.equal(isWorker, true); assert.equal(config, c);
       assert.equal(readAuth(within(c.authPath)).plan, 'plus');
       event('simulated-online-authentication');
@@ -156,31 +185,40 @@ function operations(c, isWorker) {
     },
     powershell(action, args = {}) {
       if (action === 'Discover') {
+        phase = 'simulated-discovery';
         assert.equal(isWorker, false);
         event('simulated-desktop-discovery');
         return {roots: [{pid: 90001, path: __filename, createdAt: new Date().toISOString()}],
           processes: [], standaloneCli: [], cliPaths: [{exists: true, path: process.execPath}]};
       }
       if (action === 'LaunchWorker') {
+        phase = 'wmi-launch-validation';
         assert.equal(isWorker, false);
         within(args.JobPath, c.stateRoot);
         assert.equal(path.resolve(args.CodexHome), path.dirname(c.authPath));
         event('real-wmi-launch-requested');
+        phase = 'wmi-launch-execution';
         const result = nativeSpawnSync(PS, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
           '-File', HELPER, '-Action', 'LaunchWorker', '-NodePath', process.execPath,
           '-WorkerPath', __filename, '-JobPath', args.JobPath, '-CodexHome', args.CodexHome],
         {encoding: 'utf8', windowsHide: true, timeout: 20000, maxBuffer: 1024 * 1024});
         let output;
+        phase = 'wmi-launch-result';
         try { output = JSON.parse((result.stdout || '').replace(/^\uFEFF/, '').trim()); }
         catch { throw new Error('WMI_LAUNCH_RESULT_INVALID'); }
-        assert.equal(result.status, 0, 'WMI_LAUNCH_FAILED');
-        assert.equal(output.ok, true, 'WMI_LAUNCH_FAILED');
+        if (result.status !== 0 || output.ok !== true) {
+          const error = new Error('WMI_LAUNCH_FAILED');
+          error.helperCode = output.errorCode;
+          error.helperPhase = output.phase;
+          throw error;
+        }
         assert.equal(output.jobIsolated, true, 'WMI_WORKER_NOT_ISOLATED');
         event('real-wmi-launch-confirmed');
         return output;
       }
       assert.equal(isWorker, true, 'UNEXPECTED_PARENT_HELPER_ACTION');
       if (action === 'StopDesktop') {
+        phase = 'simulated-desktop-close';
         within(args.ManifestPath, c.stateRoot);
         assert.equal(args.CloseGraceSeconds, 5, 'CLOSE_GRACE_NOT_FIVE_SECONDS');
         assert.equal(args.PreserveProcessIds, process.pid);
@@ -189,6 +227,7 @@ function operations(c, isWorker) {
         return {ok: true, desktopClosed: true};
       }
       if (action === 'StartDesktop') {
+        phase = 'simulated-desktop-restart';
         assert.equal(args.DesktopPath, __filename, 'UNEXPECTED_DESKTOP_PATH');
         assert.equal(args.ProxyUrl, 'http://127.0.0.1:17897');
         event('simulated-desktop-restart');
@@ -201,6 +240,7 @@ function operations(c, isWorker) {
 }
 
 async function worker(jobPath) {
+  phase = 'worker-initialization';
   const c = loadConfig(path.dirname(path.dirname(path.resolve(jobPath))));
   within(jobPath, c.stateRoot);
   assert.equal(path.resolve(process.env.CODEX_HOME), path.dirname(c.authPath), 'WORKER_HOME_NOT_PRESERVED');
@@ -211,12 +251,13 @@ async function worker(jobPath) {
       await engine.worker(c, jobPath, operations(c, true));
       putJson(path.join(caseRoot, 'worker-done.json'), {returned: true, networkUsed: networkCalls !== 0});
     } catch (error) {
-      putJson(path.join(caseRoot, 'worker-done.json'), {returned: false, error: engine.safeError(error), networkUsed: networkCalls !== 0});
+      putJson(path.join(caseRoot, 'worker-done.json'), {returned: false, error: engine.safeError(error), diagnostic: diagnostic(error), networkUsed: networkCalls !== 0});
     }
   } finally { clearTimeout(timer); timer = null; }
 }
 
 async function runCase(directory, blocked) {
+  phase = 'fixture-path-validation';
   caseRoot = validateCaseRoot(directory);
   fs.mkdirSync(caseRoot);
   for (const folder of ['home', 'vault', 'state']) fs.mkdirSync(path.join(caseRoot, folder));
@@ -226,22 +267,28 @@ async function runCase(directory, blocked) {
     accounts: {pro: {credentialSources: []}, plus: {credentialSources: []}}};
   putJson(path.join(caseRoot, 'config.json'), rawConfig);
   const c = loadConfig(caseRoot);
+  phase = 'fixture-credential-seeding';
   const source = syntheticAuth('pro');
   fs.writeFileSync(within(c.authPath), source);
   fs.writeFileSync(within(path.join(c.vaultRoot, 'pro.json')), source);
   fs.writeFileSync(within(path.join(c.vaultRoot, 'plus.json')), syntheticAuth('plus'));
+  phase = 'fixture-activity-seeding';
   setupActivity();
   event('schedule-started');
   const startedAt = Date.now();
+  phase = 'scheduling';
   const scheduled = await engine.schedule(c, 'plus', operations(c, false));
+  phase = 'schedule-result-validation';
   assert.equal(scheduled.scheduled, true);
   assert.equal(scheduled.workerReady, true);
   assert.equal(scheduled.workerJobIsolated, true);
   assert.equal(scheduled.delaySeconds, 3);
   assert.equal(scheduled.chatActivityChecked, true);
   event('schedule-returned');
+  phase = 'requesting-turn-completion';
   finishCallerAndOptionallyStartChat(blocked);
 
+  phase = 'waiting-for-worker';
   let completed;
   for (let attempt = 0; attempt < 350; attempt++) {
     const file = path.join(caseRoot, 'worker-done.json');
@@ -251,6 +298,8 @@ async function runCase(directory, blocked) {
     await pause(100);
   }
   assert.ok(completed, 'WORKER_COMPLETION_TIMEOUT');
+  workerDiagnostic = safeWorkerDiagnostic(completed.diagnostic);
+  phase = 'worker-result-validation';
   assert.equal(completed.networkUsed, false);
   assert.equal(networkCalls, 0);
   const jobs = fs.readdirSync(c.stateRoot).filter(name => /^job-[a-f0-9-]+\.json$/.test(name));
@@ -267,6 +316,7 @@ async function runCase(directory, blocked) {
   assert.equal(job.activityContext.callerThreadId, 'synthetic-caller');
   assert.equal(job.activityContext.callerTurnId, 'synthetic-requesting-turn');
   assert.equal(fs.existsSync(path.join(c.stateRoot, 'switch.lock')), false);
+  phase = 'pipeline-status-validation';
   const status = readJson(path.join(c.stateRoot, 'status.json'));
   const history = events();
   assert.ok(history.includes('real-activity-check-schedule') && history.includes('real-activity-check-close'));
@@ -309,6 +359,7 @@ async function runCase(directory, blocked) {
 }
 
 async function controller() {
+  phase = 'controller-initialization';
   assert.equal(process.platform, 'win32', 'WINDOWS_REQUIRED');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-switch-pipeline-'));
   const originalCaller = process.env.CODEX_THREAD_ID;
@@ -333,6 +384,15 @@ async function controller() {
 }
 
 (process.argv[2] === 'worker' ? worker(process.argv[3]) : controller()).catch(error => {
-  console.error(JSON.stringify({ok: false, error: engine.safeError(error)}));
+  if (process.argv[2] === 'worker' && caseRoot !== null) {
+    // Startup assertions can fail before worker() reaches its inner handler.
+    // Keep a safe diagnostic for the controller even if no ready file exists.
+    try { putJson(path.join(caseRoot, 'worker-done.json'), {returned: false, diagnostic: diagnostic(error)}); } catch { }
+  } else if (caseRoot !== null && workerDiagnostic === null) {
+    try { workerDiagnostic = safeWorkerDiagnostic(readJson(path.join(caseRoot, 'worker-done.json')).diagnostic); } catch { }
+  }
+  const report = {ok: false, ...diagnostic(error)};
+  if (workerDiagnostic) report.worker = workerDiagnostic;
+  console.error(JSON.stringify(report));
   process.exitCode = 1;
 });
