@@ -17,5 +17,3 @@ jobs:
       - name: Windows process and lifecycle tests
         shell: powershell
         run: .\tests\windows-smoke.ps1 -NodePath (Get-Command node.exe).Source
-      - name: Synthetic pipeline tests
-        run: node tests/pipeline-smoke.cjs

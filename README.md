@@ -56,6 +56,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows-smoke.ps1
 
 单元测试使用合成凭证、模拟网络和桌面操作。Windows 冒烟测试仅启动并终止测试自有进程，不登录账号、不调用真实切号入口、不关闭 Codex。
 
+GitHub Actions 自动运行上述两类测试。完整合成流程保留为本地手动测试：`node tests/pipeline-smoke.cjs`；它在 GitHub 托管 Windows 上仍有后台完成超时，暂未纳入自动 CI，详见 [验证说明](docs/validation.md)。
+
 ## 凭证与隐私
 
 `auth.json` 和账号副本包含登录令牌，应按密码保管。代码库仅包含通用源码、合成测试和示例配置；本机配置、账号来源、状态、任务清单、数据库、诊断与回滚文件均不发布。凭证目录应位于仓库外，并受本机文件权限保护。
