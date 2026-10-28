@@ -7,6 +7,7 @@ const path = require('node:path');
 const os = require('node:os');
 const assert = require('node:assert/strict');
 const childProcess = require('node:child_process');
+const crypto = require('node:crypto');
 
 const PS = path.join(process.env.SystemRoot || 'C:/Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe');
 const HELPER = path.resolve(__dirname, '../scripts/windows-session.ps1');
@@ -16,6 +17,19 @@ let caseRoot = null;
 let networkCalls = 0;
 let phase = 'initializing';
 let workerDiagnostic = null;
+let bootstrapRoot = null;
+
+function canonicalPath(file) {
+  let existing = path.resolve(file);
+  const remaining = [];
+  while (!fs.existsSync(existing)) {
+    const parent = path.dirname(existing);
+    assert.notEqual(parent, existing, 'CANONICAL_ANCESTOR_NOT_FOUND');
+    remaining.unshift(path.basename(existing));
+    existing = parent;
+  }
+  return path.join(fs.realpathSync.native(existing), ...remaining);
+}
 
 function diagnostic(error) {
   const result = {error: engine.safeError(error), phase};
@@ -41,19 +55,42 @@ function safeWorkerDiagnostic(value) {
 
 function within(file, directory = caseRoot) {
   assert.equal(typeof directory, 'string', 'FIXTURE_ROOT_REQUIRED');
-  const full = path.resolve(file);
-  const relative = path.relative(path.resolve(directory), full);
+  const full = canonicalPath(file);
+  const relative = path.relative(canonicalPath(directory), full);
   assert.ok(relative === '' || !relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative), 'FIXTURE_BOUNDARY_VIOLATION');
   return full;
 }
 
 function validateCaseRoot(directory) {
-  const full = path.resolve(directory);
+  const full = canonicalPath(directory);
   const testRoot = path.dirname(full);
   assert.ok(['success', 'blocked'].includes(path.basename(full)), 'UNKNOWN_FIXTURE_CASE');
-  assert.equal(path.dirname(testRoot).toLowerCase(), path.resolve(os.tmpdir()).toLowerCase(), 'FIXTURE_NOT_TEMPORARY');
+  assert.equal(path.dirname(testRoot).toLowerCase(), canonicalPath(os.tmpdir()).toLowerCase(), 'FIXTURE_NOT_TEMPORARY');
   assert.match(path.basename(testRoot), /^codex-switch-pipeline-[a-zA-Z0-9]+$/, 'INVALID_FIXTURE_ROOT');
   return full;
+}
+
+function initializeWorkerBootstrap(jobPath) {
+  phase = 'worker-bootstrap-proof';
+  const file = canonicalPath(jobPath);
+  const directory = path.dirname(path.dirname(file));
+  const root = path.dirname(directory);
+  // Before trusting worker TEMP (which may use an 8.3 alias), establish that
+  // this is the controller's synthetic fixture using its matching job nonce.
+  assert.ok(['success', 'blocked'].includes(path.basename(directory)), 'BOOTSTRAP_CASE_INVALID');
+  assert.match(path.basename(root), /^codex-switch-pipeline-[a-zA-Z0-9]+$/, 'BOOTSTRAP_ROOT_INVALID');
+  assert.equal(path.dirname(root).toLowerCase(), canonicalPath(os.tmpdir()).toLowerCase(), 'BOOTSTRAP_NOT_TEMPORARY');
+  assert.equal(path.basename(path.dirname(file)), 'state', 'BOOTSTRAP_STATE_INVALID');
+  assert.match(path.basename(file), /^job-[a-f0-9-]+\.json$/, 'BOOTSTRAP_JOB_INVALID');
+  const proof = JSON.parse(fs.readFileSync(path.join(directory, 'fixture-proof.json'), 'utf8'));
+  const job = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(proof.kind, 'synthetic-account-switch-pipeline', 'BOOTSTRAP_PROOF_INVALID');
+  assert.match(proof.nonce, /^[a-f0-9-]{36}$/, 'BOOTSTRAP_NONCE_INVALID');
+  assert.equal(canonicalPath(proof.root).toLowerCase(), root.toLowerCase(), 'BOOTSTRAP_PROOF_ROOT_MISMATCH');
+  assert.equal(job.testFixtureNonce, proof.nonce, 'BOOTSTRAP_JOB_PROOF_MISMATCH');
+  assert.equal(canonicalPath(job.authPath).toLowerCase(), path.join(directory, 'home', 'auth.json').toLowerCase(), 'BOOTSTRAP_AUTH_PATH_MISMATCH');
+  bootstrapRoot = directory;
+  return file;
 }
 
 function readJson(file) { return JSON.parse(fs.readFileSync(within(file), 'utf8')); }
@@ -143,7 +180,7 @@ function loadConfig(directory) {
   assert.equal(c.authPath.toLowerCase(), path.join(caseRoot, 'home', 'auth.json').toLowerCase(), 'CONFIG_AUTH_PATH_MISMATCH');
   assert.equal(c.stateRoot.toLowerCase(), path.join(caseRoot, 'state').toLowerCase(), 'CONFIG_STATE_PATH_MISMATCH');
   assert.equal(c.vaultRoot.toLowerCase(), path.join(caseRoot, 'vault').toLowerCase(), 'CONFIG_VAULT_PATH_MISMATCH');
-  assert.equal(c.nodePath.toLowerCase(), process.execPath.toLowerCase(), 'CONFIG_NODE_PATH_MISMATCH');
+  assert.equal(canonicalPath(c.nodePath).toLowerCase(), canonicalPath(process.execPath).toLowerCase(), 'CONFIG_NODE_PATH_MISMATCH');
   assert.equal(c.launchDelaySeconds, 3, 'CONFIG_LAUNCH_DELAY_MISMATCH');
   assert.equal(c.closeGraceSeconds, 5, 'CONFIG_CLOSE_GRACE_MISMATCH');
   assert.deepEqual(c.accounts, {pro: {credentialSources: []}, plus: {credentialSources: []}}, 'CONFIG_ACCOUNTS_MISMATCH');
@@ -197,6 +234,8 @@ function operations(c, isWorker) {
         within(args.JobPath, c.stateRoot);
         assert.equal(path.resolve(args.CodexHome), path.dirname(c.authPath));
         event('real-wmi-launch-requested');
+        const proof = readJson(path.join(caseRoot, 'fixture-proof.json'));
+        putJson(args.JobPath, {...readJson(args.JobPath), testFixtureNonce: proof.nonce});
         phase = 'wmi-launch-execution';
         const result = nativeSpawnSync(PS, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
           '-File', HELPER, '-Action', 'LaunchWorker', '-NodePath', process.execPath,
@@ -241,9 +280,10 @@ function operations(c, isWorker) {
 
 async function worker(jobPath) {
   phase = 'worker-initialization';
+  jobPath = initializeWorkerBootstrap(jobPath);
   const c = loadConfig(path.dirname(path.dirname(path.resolve(jobPath))));
   within(jobPath, c.stateRoot);
-  assert.equal(path.resolve(process.env.CODEX_HOME), path.dirname(c.authPath), 'WORKER_HOME_NOT_PRESERVED');
+  assert.equal(canonicalPath(process.env.CODEX_HOME).toLowerCase(), path.dirname(c.authPath).toLowerCase(), 'WORKER_HOME_NOT_PRESERVED');
   event('worker-started-with-fixture-home');
   let timer = setTimeout(() => process.exit(3), 35000);
   try {
@@ -261,6 +301,8 @@ async function runCase(directory, blocked) {
   caseRoot = validateCaseRoot(directory);
   fs.mkdirSync(caseRoot);
   for (const folder of ['home', 'vault', 'state']) fs.mkdirSync(path.join(caseRoot, folder));
+  putJson(path.join(caseRoot, 'fixture-proof.json'), {kind: 'synthetic-account-switch-pipeline',
+    nonce: crypto.randomUUID(), root: path.dirname(caseRoot)});
   const rawConfig = {authPath: path.join(caseRoot, 'home', 'auth.json'), vaultRoot: path.join(caseRoot, 'vault'),
     stateRoot: path.join(caseRoot, 'state'), clashConfigRoot: path.join(caseRoot, 'unused-clash'),
     nodePath: process.execPath, launchDelaySeconds: 3, closeGraceSeconds: 5,
@@ -361,7 +403,9 @@ async function runCase(directory, blocked) {
 async function controller() {
   phase = 'controller-initialization';
   assert.equal(process.platform, 'win32', 'WINDOWS_REQUIRED');
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-switch-pipeline-'));
+  // Windows CI can provide TEMP as an 8.3 alias while .NET expands launch
+  // arguments to long paths. Both spellings must resolve to the same boundary.
+  const root = canonicalPath(fs.mkdtempSync(path.join(canonicalPath(os.tmpdir()), 'codex-switch-pipeline-')));
   const originalCaller = process.env.CODEX_THREAD_ID;
   process.env.CODEX_THREAD_ID = 'synthetic-caller';
   let finished = false;
@@ -384,10 +428,13 @@ async function controller() {
 }
 
 (process.argv[2] === 'worker' ? worker(process.argv[3]) : controller()).catch(error => {
-  if (process.argv[2] === 'worker' && caseRoot !== null) {
+  if (process.argv[2] === 'worker' && (caseRoot !== null || bootstrapRoot !== null)) {
     // Startup assertions can fail before worker() reaches its inner handler.
     // Keep a safe diagnostic for the controller even if no ready file exists.
-    try { putJson(path.join(caseRoot, 'worker-done.json'), {returned: false, diagnostic: diagnostic(error)}); } catch { }
+    try {
+      const directory = caseRoot || bootstrapRoot;
+      fs.writeFileSync(within(path.join(directory, 'worker-done.json'), directory), JSON.stringify({returned: false, diagnostic: diagnostic(error)}));
+    } catch { }
   } else if (caseRoot !== null && workerDiagnostic === null) {
     try { workerDiagnostic = safeWorkerDiagnostic(readJson(path.join(caseRoot, 'worker-done.json')).diagnostic); } catch { }
   }

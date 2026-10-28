@@ -4,10 +4,12 @@ auth.json
 pro.json
 plus.json
 rollback.json
+status.json
 *.local.json
 *.sqlite*
 *.db*
 *.log
+*.jsonl
 .env*
 state/
 vault/

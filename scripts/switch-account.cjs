@@ -18,6 +18,16 @@ const delay = ms => new Promise(r => setTimeout(r, ms));
 const ACCOUNT_SWITCH_MODE = 'account-only';
 const ACCOUNT_COUNTRY = 'US';
 const WORKER_LAUNCH_MODE = 'wmi-breakaway-v1';
+function canonicalPath(file) {
+  let existing=path.resolve(file);
+  const missing=[];
+  while(!fs.existsSync(existing)) {
+    const parent=path.dirname(existing);
+    if(parent===existing)fail('CONFIG_PATH_UNVERIFIED');
+    missing.unshift(path.basename(existing));existing=parent;
+  }
+  return path.join(fs.realpathSync.native(existing),...missing);
+}
 function config(file=path.join(BASE,'config.json'),env=process.env) {
   const codexHome=env.CODEX_HOME || path.join(os.homedir(),'.codex');
   const local=fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):{};
@@ -29,8 +39,11 @@ function config(file=path.join(BASE,'config.json'),env=process.env) {
     traceUrls:['https://chatgpt.com/cdn-cgi/trace','https://api.openai.com/cdn-cgi/trace'],...local};
   // Respect an intentionally configured home without assigning to CODEX_HOME.
   if (env.CODEX_HOME) c.authPath = path.join(env.CODEX_HOME, 'auth.json');
-  c.authPath=path.resolve(c.authPath);
-  for(const key of ['vaultRoot','stateRoot','clashConfigRoot','nodePath'])c[key]=path.resolve(c[key]);
+  // Windows shells may expand an 8.3 alias while Node preserves its spelling.
+  // Use one on-disk representation at both sides of the worker boundary, but
+  // reject credential-path links before resolving them.
+  for(const key of ['authPath','vaultRoot','stateRoot'])noLinks(c[key]);
+  for(const key of ['authPath','vaultRoot','stateRoot','clashConfigRoot','nodePath'])c[key]=canonicalPath(c[key]);
   if(!Number.isFinite(c.launchDelaySeconds) || c.launchDelaySeconds<0 || c.launchDelaySeconds>60)fail('CONFIG_DELAY_INVALID');
   if(!Number.isFinite(c.closeGraceSeconds) || c.closeGraceSeconds<0 || c.closeGraceSeconds>60)fail('CONFIG_CLOSE_GRACE_INVALID');
   return c;
@@ -58,7 +71,8 @@ function signalJson(file,data) {
 function noLinks(file) {
   let p = path.resolve(file);
   while (true) {
-    if (fs.existsSync(p) && fs.lstatSync(p).isSymbolicLink()) fail('LINK_PATH_REJECTED');
+    try {if(fs.lstatSync(p).isSymbolicLink())fail('LINK_PATH_REJECTED');}
+    catch(error) {if(error.code!=='ENOENT' && error.code!=='ENOTDIR')throw error;}
     const parent = path.dirname(p); if (p === parent) break; p = parent;
   }
 }

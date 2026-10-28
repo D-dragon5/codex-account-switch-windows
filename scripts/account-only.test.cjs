@@ -417,15 +417,29 @@ test('configured forward-slash auth path matches the worker CODEX_HOME represent
   const scheduler=engine.config(file,{});
   const worker=engine.config(file,{CODEX_HOME:path.dirname(scheduler.authPath)});
   assert.equal(worker.authPath,scheduler.authPath);
-  assert.equal(worker.authPath,f.c.authPath);
+  assert.equal(worker.authPath,fs.realpathSync.native(f.c.authPath));
 });
 
 test('portable defaults use three-second launch and five-second shutdown grace', t => {
   const f=fixture(t);
   const c=engine.config(path.join(f.directory,'missing-config.json'),{CODEX_HOME:path.dirname(f.c.authPath)});
   assert.equal(c.launchDelaySeconds,3);assert.equal(c.closeGraceSeconds,5);
-  assert.equal(c.authPath,f.c.authPath);assert.equal(c.nodePath,process.execPath);
-  assert.ok(c.stateRoot.startsWith(path.dirname(f.c.authPath)+path.sep));
+  assert.equal(c.authPath,fs.realpathSync.native(f.c.authPath));assert.equal(c.nodePath,fs.realpathSync.native(process.execPath));
+  assert.ok(c.stateRoot.startsWith(path.dirname(c.authPath)+path.sep));
+});
+
+test('Windows path spelling changes resolve to the same credential file', {skip:process.platform!=='win32'}, t => {
+  const f=fixture(t),file=path.join(f.directory,'config.json');
+  fs.writeFileSync(file,JSON.stringify({...f.c,authPath:f.c.authPath.toUpperCase()}));
+  const c=engine.config(file,{});
+  assert.equal(c.authPath,fs.realpathSync.native(f.c.authPath));
+});
+
+test('canonicalization does not hide a credential-directory junction', {skip:process.platform!=='win32'}, t => {
+  const f=fixture(t),junction=path.join(f.directory,'linked-home'),file=path.join(f.directory,'config.json');
+  fs.symlinkSync(path.dirname(f.c.authPath),junction,'junction');
+  fs.writeFileSync(file,JSON.stringify({...f.c,authPath:path.join(junction,'auth.json')}));
+  assert.throws(()=>engine.config(file,{}),errorCode('LINK_PATH_REJECTED'));
 });
 
 test('another active chat blocks scheduling before any desktop or network operations', async t => {
