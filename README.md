@@ -31,6 +31,8 @@ node scripts/switch-account.cjs plan plus
 node scripts/switch-account.cjs switch plus --execute
 ```
 
+也可以从 PowerShell 运行 `scripts/manual-switch.ps1`，或使用桌面快捷方式，在菜单中选择 Plus 或 Pro。菜单会先显示当前状态并执行目标预检，再调用同一个后台切换流程；手动运行时本机聊天必须全部空闲。快捷方式只应指向本机安装目录中的脚本，不要把 `config.json` 或凭证复制进仓库。
+
 `config.json` 不入库。默认目录为 `CODEX_HOME`（未设置时为用户的 `.codex`）下的 `account-switch/vault` 与 `account-switch/state`。可覆盖 `authPath`、`vaultRoot`、`stateRoot`、`nodePath`、`clashConfigRoot`、`launchDelaySeconds`、`closeGraceSeconds`，以及每个账号的 `credentialSources`。例如使用已有本地 HTTP 代理时，在本机配置增加 `"proxyUrl": "http://127.0.0.1:7897"`，端口应与实际代理一致。
 
 代理调用时应保留 Codex 提供的 `CODEX_THREAD_ID`。手动运行时没有调用方豁免，所有本地聊天都必须空闲。脚本收到调度成功后会自动完成后续步骤；操作期间不要开始新任务。
